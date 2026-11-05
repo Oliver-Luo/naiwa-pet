@@ -54,7 +54,14 @@ enum Hooks {
 
     static func install() throws {
         let fm = FileManager.default
-        let original = (try? String(contentsOf: settings, encoding: .utf8)) ?? "{}\n"
+        // 只有文件不存在才从空对象开始；存在但读不出来就别碰，免得整个换掉
+        var original = "{}\n"
+        if fm.fileExists(atPath: settings.path) {
+            guard let text = try? String(contentsOf: settings, encoding: .utf8) else {
+                throw Failure("读不了 \(settings.path)（不是 UTF-8 文本？），没有写入。请先修好这个文件再装")
+            }
+            original = text
+        }
         // 先去掉旧的（包括旧版的 `naiwa laugh`），再整套重新装
         let text = original.replacingOccurrences(of: ours, with: "", options: .regularExpression)
         let old = try parse(text)
@@ -80,9 +87,9 @@ enum Hooks {
             return
         }
         try fm.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fm.fileExists(atPath: settings.path) {
-            let backup = settings.path + ".bak-naiwa"
-            try? fm.removeItem(atPath: backup)
+        // 备份只留第一次的原文件，之后再装不覆盖
+        let backup = settings.path + ".bak-naiwa"
+        if fm.fileExists(atPath: settings.path), !fm.fileExists(atPath: backup) {
             try fm.copyItem(atPath: settings.path, toPath: backup)
         }
         try new.write(to: settings, atomically: true, encoding: .utf8)
