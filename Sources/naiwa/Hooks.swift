@@ -31,6 +31,17 @@ enum Hooks {
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/settings.json")
     }
 
+    /// settings.json 常是指向 dotfiles 的软链接：顺着链接找到真实文件，读、备份、写都落在它上面。
+    /// 直接原子写链接会把链接换成普通文件；写真实文件时 Foundation 会保留它原来的权限
+    static var target: URL {
+        var url = settings
+        for _ in 0..<16 {
+            guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) else { break }
+            url = URL(fileURLWithPath: dest, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+        }
+        return url
+    }
+
     /// PATH 上的 naiwa，找不到就用当前可执行文件的绝对路径
     static var binary: String {
         let path = ProcessInfo.processInfo.environment["PATH"]?.split(separator: ":")
@@ -54,7 +65,9 @@ enum Hooks {
 
     static func install() throws {
         let fm = FileManager.default
-        let original = (try? String(contentsOf: settings, encoding: .utf8)) ?? "{}\n"
+        let file = target
+        let shown = file == settings ? settings.path : "\(settings.path) → \(file.path)"
+        let original = (try? String(contentsOf: file, encoding: .utf8)) ?? "{}\n"
         // 先去掉旧的（包括旧版的 `naiwa laugh`），再整套重新装
         let text = original.replacingOccurrences(of: ours, with: "", options: .regularExpression)
         let old = try parse(text)
@@ -76,25 +89,28 @@ enum Hooks {
             throw Failure("插入后内容和预期不一致，没有写入。请手动加，见 `naiwa hooks`")
         }
         if new == original {
-            print("已经接入过了：\(settings.path)")
+            print("已经接入过了：\(shown)")
             return
         }
-        try fm.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fm.fileExists(atPath: settings.path) {
+        try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: file.path) {
+            // 备份放在 settings.json 旁边，拷的是真实文件的内容，不是链接
             let backup = settings.path + ".bak-naiwa"
             try? fm.removeItem(atPath: backup)
-            try fm.copyItem(atPath: settings.path, toPath: backup)
+            try fm.copyItem(atPath: file.path, toPath: backup)
         }
-        try new.write(to: settings, atomically: true, encoding: .utf8)
+        try new.write(to: file, atomically: true, encoding: .utf8)
         print("""
-        已接入 Claude Code：\(settings.path)
+        已接入 Claude Code：\(shown)
           \(events.map(\.name).joined(separator: "、")) 各加了一条 `\(command)`（原文件备份在 .bak-naiwa）
           新开的 Claude Code 会话生效；已经开着的要重开
         """)
     }
 
     static func uninstall() throws {
-        let text = try String(contentsOf: settings, encoding: .utf8)
+        let file = target
+        let shown = file == settings ? settings.path : "\(settings.path) → \(file.path)"
+        let text = try String(contentsOf: file, encoding: .utf8)
         guard containsOurs(try parse(text)) else {
             print("没有接入过")
             return
@@ -107,8 +123,8 @@ enum Hooks {
         guard let parsed = try? parse(new), !containsOurs(parsed) else {
             throw Failure("settings.json 被重新排版过，找不到原样那几段。请手动删掉 hooks 里含 `naiwa` 的条目")
         }
-        try new.write(to: settings, atomically: true, encoding: .utf8)
-        print("已撤掉：\(settings.path)")
+        try new.write(to: file, atomically: true, encoding: .utf8)
+        print("已撤掉：\(shown)")
     }
 
     /// 在 hooks.<event> 数组开头插入；没有这个事件就在 hooks 里加；没有 hooks 就在最外层加
