@@ -128,7 +128,7 @@ enum CLI {
     /// 开发时直接把自己拉起来，并脱离当前会话，返回它的 pid。
     @discardableResult
     static func launch(_ arguments: [String]) -> pid_t? {
-        let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let exe = executable()
         let bundle = exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         if bundle.pathExtension == "app" {
             run("/usr/bin/open", ["-g", "-a", bundle.path, "--args"] + arguments)
@@ -147,6 +147,11 @@ enum CLI {
         let ok = posix_spawn(&pid, exe.path, &actions, &attr, argv, environ) == 0
         argv.forEach { free($0) }
         return ok ? pid : nil
+    }
+
+    /// 自己的可执行文件，软链解开。不能只看 argv[0]：从 PATH 上跑时它就是个 naiwa，会按当前目录去找
+    static func executable(argv0: String = CommandLine.arguments[0]) -> URL {
+        (Bundle.main.executableURL ?? URL(fileURLWithPath: argv0)).resolvingSymlinksInPath()
     }
 
     private static func run(_ path: String, _ arguments: [String]) {

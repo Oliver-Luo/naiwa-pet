@@ -11,6 +11,7 @@ final class Sessions {
         var start: Date?          // 这一轮开始干活的时间（用户发消息，或者第一次调工具）
         var tools = 0             // 这一轮调了几次工具
         var waiting: String?      // 在等你批准什么
+        var stopped: (start: Date?, tools: Int, glanced: Bool)?   // 上次 Stop 停下时这一轮的账：别的 Stop hook 可能拦下来让它接着干
         var seen = Date()
     }
 
@@ -21,6 +22,10 @@ final class Sessions {
     }
 
     private(set) var all: [String: Session] = [:]
+    /// 现在几点；测试里换成假的
+    var now: () -> Date = Date.init
+    /// 半小时没动静就不算它还在干活
+    static let expiry: TimeInterval = 1800
 
     var mood: Mood {
         prune()
@@ -29,18 +34,24 @@ final class Sessions {
         return .idle
     }
 
+    /// 下一个会话超时的时间，到点要重新看一次状态；没有在干活、等你的会话就是 nil
+    var nextExpiry: Date? {
+        all.values.filter { $0.start != nil || $0.waiting != nil }.map { $0.seen.addingTimeInterval(Self.expiry) }.min()
+    }
+
     /// 等你的那个会话：项目名和在等什么
     var waitingText: String? {
         guard let s = all.values.filter({ $0.waiting != nil }).max(by: { $0.seen < $1.seen }) else { return nil }
         return "\(Self.project(s.cwd)) \(s.waiting!)"
     }
 
-    /// 处理一条 hook 事件；一轮结束时返回这一轮的结果
-    func handle(_ e: [String: Any]) -> Finished? {
+    /// 处理一条 hook 事件；一轮结束时返回这一轮的结果。now 给测试用
+    func handle(_ e: [String: Any], now eventTime: Date? = nil) -> Finished? {
         guard let event = e["hook_event_name"] as? String, let id = e["session_id"] as? String else { return nil }
-        let now = Date()
-        var s = all[id] ?? Session(cwd: e["cwd"] as? String ?? "")
-        if let cwd = e["cwd"] as? String { s.cwd = cwd }
+        let now = eventTime ?? now()
+        var s = all[id] ?? Session(cwd: "")
+        // 事件里的 cwd 是会话当前目录，Claude cd 进子目录就跟着变；项目名只认第一次拿到的
+        if s.cwd.isEmpty, let cwd = e["cwd"] as? String { s.cwd = cwd }
         s.seen = now
         var finished: Finished?
         switch event {
@@ -48,11 +59,27 @@ final class Sessions {
             s.start = now
             s.tools = 0
             s.waiting = nil
+            s.stopped = nil
         case "PreToolUse":
             s.waiting = nil
             s.tools += 1
             if s.start == nil { s.start = now }
-        case "PostToolUse", "PostToolUseFailure":
+        case "PostToolUse":
+            s.waiting = nil
+        case "PostToolUseFailure":
+            // 按 Esc 打断时没有 Stop，只有正在跑的工具报一个 is_interrupt 的失败：这一轮就算停了，不瞥
+            // 工具被新消息顶掉或 Ctrl+B 转后台也会带 is_interrupt，这时其实还在干，算错了也只是到下个事件为止
+            if e["is_interrupt"] as? Bool == true {
+                s.start = nil
+                s.tools = 0
+                s.stopped = nil
+            }
+            s.waiting = nil
+        case "StopFailure":
+            // API 出错结束的一轮（限流、认证失败之类）：发的是它不是 Stop，停下来但不瞥
+            s.start = nil
+            s.tools = 0
+            s.stopped = nil
             s.waiting = nil
         case "Notification":
             switch Self.notification(type: e["notification_type"] as? String, message: e["message"] as? String ?? "") {
@@ -61,9 +88,19 @@ final class Sessions {
             case .ignore: break
             }
         case "Stop":
+            // 别的 Stop hook 拦下结束（decision: block）时 Claude 接着干同一轮，再停时带 stop_hook_active: true：
+            // 接上停下前的账，时长从最开始算、工具次数累加，一轮最多瞥一次
+            var glanced = false
+            if e["stop_hook_active"] as? Bool == true, let p = s.stopped {
+                s.start = p.start ?? s.start
+                s.tools += p.tools
+                glanced = p.glanced
+            }
             // naiwa_seconds：`naiwa demo` 用来假装这一轮跑了多久
             let seconds = e["naiwa_seconds"] as? Double ?? s.start.map { now.timeIntervalSince($0) } ?? 0
-            finished = Finished(tier: Self.tier(seconds: seconds, tools: s.tools), project: Self.project(s.cwd), seconds: seconds)
+            let tier = glanced ? .none : Self.tier(seconds: seconds, tools: s.tools)
+            finished = Finished(tier: tier, project: Self.project(s.cwd), seconds: seconds)
+            s.stopped = (s.start, s.tools, glanced || tier != .none)
             s.start = nil
             s.tools = 0
             s.waiting = nil
@@ -125,8 +162,8 @@ final class Sessions {
 
     /// 会话没收到 Stop 就没了（Claude 被杀掉之类），半小时没动静就不算它还在干活
     private func prune() {
-        let now = Date()
-        for (id, s) in all where (s.start != nil || s.waiting != nil) && now.timeIntervalSince(s.seen) > 1800 {
+        let now = now()
+        for (id, s) in all where (s.start != nil || s.waiting != nil) && now.timeIntervalSince(s.seen) >= Self.expiry {
             all[id]?.start = nil
             all[id]?.waiting = nil
         }

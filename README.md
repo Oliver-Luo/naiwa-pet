@@ -4,7 +4,11 @@
 
 原生 Swift，没有声音，不抢焦点，不花 token。
 
-<p align="center"><img src="docs/demo.webp" width="240" alt="空闲 → 干活 → 等你批准 → 惊鸿一瞥"></p>
+[![奶蛙与 Clawd 的视频预览](docs/assets/promo-preview.webp)](#视频介绍)
+
+## 视频介绍
+
+https://github.com/user-attachments/assets/3b57d454-f4c0-4b1f-8327-81961681a8f9
 
 ## 所有奶蛙
 
@@ -127,17 +131,21 @@ defaults write com.nwverse.naiwa bigSeconds -float 30
 
 ## 和 Claude Code 怎么对上的
 
-`naiwa hooks install` 在 `~/.claude/settings.json` 的六个事件里各加一条 `naiwa hook`，每次触发时把事件转给奶蛙：
+`naiwa hooks install` 在 `~/.claude/settings.json` 的八个事件里各加一条 `naiwa hook`，每次触发时把事件转给奶蛙：
 
 | 事件 | 奶蛙记下什么 |
 |---|---|
 | `UserPromptSubmit` | 这一轮开始了，开始计时 |
 | `PreToolUse` / `PostToolUse` | 动了工具；要是刚才在等你批准，说明你批准了 |
+| `PostToolUseFailure` | 工具失败了，还在干；`is_interrupt` 为真多半是你在工具跑着时按 Esc 打断了，这一轮结束，不瞥 |
 | `Notification` | 看 `notification_type`：`permission_prompt`、`elicitation_dialog`、`agent_needs_input` 算「等你」；`idle_prompt`（说完 60 秒你没理它）等其他提醒不算 |
-| `Stop` | 这一轮结束：跑满门槛并且动过工具就瞥你一眼，否则什么都不做 |
+| `Stop` | 这一轮结束：跑满门槛并且动过工具就瞥你一眼，否则什么都不做。别的 Stop hook 拦下来让它接着干（`stop_hook_active`）时算同一轮：时长从头算，一轮最多瞥一次 |
+| `StopFailure` | API 出错（限流、认证失败之类）结束了这一轮：回到空闲，不瞥 |
 | `SessionEnd` | 会话关了，不再记它 |
 
-已知局限：Claude 中途停下来等后台任务、或者停下来问你问题，从事件上看和「做完了」一样，只要时长够、动过工具也会有反应。
+老版本装的只有六个事件，更新后重新跑一次 `naiwa hooks install`。
+
+已知局限：在权限确认框上按 Esc 不发任何事件，奶蛙会一直「等你」；按 Esc 时如果没有工具在跑（还在想、还在写字）也不发事件，奶蛙会一直「干活」。这两种都要等你再发消息，或者半小时没动静自己回到空闲。Claude 中途停下来等后台任务、或者停下来问你问题，从事件上看和「做完了」一样，只要时长够、动过工具也会有反应。
 
 **Codex**：只能接 `notify`，它只在一轮结束时通知，所以只能做到「做完瞥一眼」，没有干活、等你这些状态。在 `~/.codex/config.toml` 最上面加 `notify = ["/Users/你/.local/bin/naiwa", "glance"]`。Codex 只认一个 notify，已经有的话要自己串起来。
 
@@ -148,6 +156,16 @@ defaults write com.nwverse.naiwa bigSeconds -float 30
 [MIT](LICENSE)
 
 ## 开发
+
+### PR 检查与自动合并
+
+PR 会运行 `macOS checks`：检查脚本语法和素材配置 JSON，编译 Apple 芯片与 Intel 版本，打包通用 App，并验证架构、签名和 `pets` 命令。
+
+维护者给面向 `main` 的非草稿 PR 加上 `automerge` 标签后，会开启自动 squash 合并。必须通过检查、与最新 `main` 同步，并解决所有 review 对话，才会合入；分支落后时先点 **Update branch**，更新后会重新检查。首次贡献者的工作流可能需要维护者先批准运行。
+
+移除 `automerge` 标签、转为草稿或改投其他分支，会取消等待中的自动合并。不加标签的 PR 仍由维护者手动合并。CI 不验证桌面上的播放、锁屏停播和鼠标穿透；相关改动仍须按 `AGENTS.md` 在真机确认，再加标签。
+
+### 本地构建
 
 ```bash
 swift build -c release
