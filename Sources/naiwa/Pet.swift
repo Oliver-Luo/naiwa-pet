@@ -27,9 +27,10 @@ final class Pet {
     private var idleTurn = 0
     private var reacting = false
     private var visible = true
-    private var away = Pet.screenLocked()   // 屏幕睡了、锁屏了，或者切到了别的用户
+    private var away = Away(locked: Pet.screenLocked())
     private var frameTimer: Timer?
     private var slotTimer: Timer?
+    private var expiryTimer: Timer?
     private var bubbleIsWaiting = false
     /// 鼠标停在它身上换出来的那只，到下个时段（或者换了安排）就不算了
     private var picked: String?
@@ -50,17 +51,16 @@ final class Pet {
         let nc = NotificationCenter.default, ws = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.placeOnScreen() }
         nc.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: panel, queue: .main) { [weak self] _ in self?.updateVisibility() }
-        for (n, away) in [(NSWorkspace.screensDidSleepNotification, true), (NSWorkspace.screensDidWakeNotification, false),
-                          (NSWorkspace.sessionDidResignActiveNotification, true), (NSWorkspace.sessionDidBecomeActiveNotification, false)] {
+        for n in Away.workspaceEvents {
             ws.addObserver(forName: n, object: nil, queue: .main) { [weak self] _ in
-                self?.away = away
+                self?.away.apply(n, lockedNow: Pet.screenLocked())
                 self?.updateVisibility()
             }
         }
         // 锁屏时窗口的遮挡状态还是「看得见」，要单独听锁屏 / 解锁
-        for (n, away) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
-            DistributedNotificationCenter.default().addObserver(forName: .init(n), object: nil, queue: .main) { [weak self] _ in
-                self?.away = away
+        for n in Away.lockEvents {
+            DistributedNotificationCenter.default().addObserver(forName: n, object: nil, queue: .main) { [weak self] _ in
+                self?.away.apply(n, lockedNow: Pet.screenLocked())
                 self?.updateVisibility()
             }
         }
@@ -69,7 +69,7 @@ final class Pet {
     func show() {
         placeOnScreen()
         panel.orderFrontRegardless()
-        visible = !away   // 锁着屏启动就先别播，解锁的通知来了再播
+        visible = !away.any   // 锁着屏启动就先别播，解锁的通知来了再播
         scheduleSlotChange()
         render()
     }
@@ -122,6 +122,7 @@ final class Pet {
         reloadIfEdited()
         if reacting { return }
         let mood = sessions.mood
+        scheduleExpiry()
         if mood == .waiting, let t = sessions.waitingText, bubble.text != t || !bubbleIsWaiting {
             bubbleIsWaiting = true
             bubble.show(t, above: panel.frame)
@@ -196,7 +197,7 @@ final class Pet {
 
     /// 被别的窗口挡住、屏幕睡了、锁屏、切走用户：停掉循环；回来再接着演
     private func updateVisibility() {
-        let now = panel.occlusionState.contains(.visible) && !away
+        let now = panel.occlusionState.contains(.visible) && !away.any
         guard now != visible else { return }
         visible = now
         if !visible, !reacting, let s = shown, assets.clips[s]?.loop == true {
@@ -218,6 +219,18 @@ final class Pet {
         }
         RunLoop.main.add(t, forMode: .common)
         slotTimer = t
+    }
+
+    /// 会话半天没动静（打断、崩了没收到事件）到点自己回到空闲，不用等下一个事件
+    private func scheduleExpiry() {
+        let at = sessions.nextExpiry
+        if let t = expiryTimer, t.isValid, t.fireDate == at { return }
+        expiryTimer?.invalidate()
+        expiryTimer = nil
+        guard let at else { return }
+        let t = Timer(fire: at, interval: 0, repeats: false) { [weak self] _ in self?.render() }
+        RunLoop.main.add(t, forMode: .common)
+        expiryTimer = t
     }
 
     // MARK: 安排（哪个时段出来哪几只、干活时是哪只）
@@ -345,6 +358,7 @@ final class Pet {
             origin = NSPoint(x: vf.maxX - size - 24, y: vf.minY)
         }
         panel.setFrame(NSRect(origin: origin ?? .zero, size: CGSize(width: size, height: size)), display: true)
+        followBubble()
     }
 
     func savePosition() { Prefs.origin = panel.frame.origin }
@@ -352,13 +366,22 @@ final class Pet {
     func followBubble() { bubble.follow(panel.frame, animated: false) }
 
     func resize(to size: CGFloat) {
-        // 脚底中点不动
+        // 脚底中点不动，放不下就往屏幕里挪
         let f = panel.frame
-        let origin = NSPoint(x: f.midX - size / 2, y: f.minY)
+        var r = NSRect(x: f.midX - size / 2, y: f.minY, width: size, height: size)
+        if let vf = (panel.screen ?? NSScreen.main)?.visibleFrame { r = Self.clamp(r, into: vf) }
         Prefs.size = size
-        Prefs.origin = origin
-        panel.setFrame(NSRect(origin: origin, size: CGSize(width: size, height: size)), display: true)
+        Prefs.origin = r.origin
+        panel.setFrame(r, display: true)
         followBubble()
+    }
+
+    /// 把 r 挪进 vf；比屏幕还宽就水平居中，比屏幕还高就贴底
+    static func clamp(_ r: NSRect, into vf: NSRect) -> NSRect {
+        var o = r.origin
+        o.x = r.width > vf.width ? vf.midX - r.width / 2 : min(max(o.x, vf.minX), vf.maxX - r.width)
+        o.y = r.height > vf.height ? vf.minY : min(max(o.y, vf.minY), vf.maxY - r.height)
+        return NSRect(origin: o, size: r.size)
     }
 
     func menu() -> NSMenu {
@@ -534,6 +557,29 @@ struct Stroke {
             return true
         }
         return false
+    }
+}
+
+/// 屏幕睡了、切到了别的用户、锁屏了：三件事分开记，哪个通知后到都不会盖掉别的（睡着时锁了屏，屏幕醒来还锁着）
+struct Away {
+    var asleep = false, inactive = false, locked = false
+    var any: Bool { asleep || inactive || locked }
+
+    static let workspaceEvents = [NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification,
+                                  NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.sessionDidBecomeActiveNotification]
+    static let lockEvents = [Notification.Name("com.apple.screenIsLocked"), Notification.Name("com.apple.screenIsUnlocked")]
+
+    /// 每个通知只改自己那一项；醒来 / 切回来时再查一次锁屏：解锁通知可能早在醒来前就到了，也可能根本不来
+    mutating func apply(_ n: Notification.Name, lockedNow: @autoclosure () -> Bool) {
+        switch n {
+        case NSWorkspace.screensDidSleepNotification: asleep = true
+        case NSWorkspace.screensDidWakeNotification: asleep = false; locked = lockedNow()
+        case NSWorkspace.sessionDidResignActiveNotification: inactive = true
+        case NSWorkspace.sessionDidBecomeActiveNotification: inactive = false; locked = lockedNow()
+        case Away.lockEvents[0]: locked = true
+        case Away.lockEvents[1]: locked = false
+        default: break
+        }
     }
 }
 
