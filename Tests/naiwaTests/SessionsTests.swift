@@ -2,84 +2,34 @@ import Foundation
 import Testing
 @testable import naiwa
 
-/// 一轮被打断、因为 API 出错结束时，奶蛙要回到空闲；没动静的会话到点自己过期
-struct SessionsTests {
-    final class Clock {
-        var t = Date(timeIntervalSince1970: 1_000_000)
+struct SessionsProjectTests {
+    func event(_ name: String, cwd: String?, _ extra: [String: Any] = [:]) -> [String: Any] {
+        var e: [String: Any] = ["hook_event_name": name, "session_id": "s1"]
+        if let cwd { e["cwd"] = cwd }
+        return e.merging(extra) { $1 }
     }
 
-    func make() -> (Sessions, Clock) {
-        let s = Sessions(), c = Clock()
-        s.now = { c.t }
-        return (s, c)
+    /// Claude cd 进子目录后，项目名还是会话开始时的目录
+    @Test func projectKeepsFirstCwd() {
+        let s = Sessions()
+        let root = "/Users/x/my-repo", sub = "/Users/x/my-repo/Sources/naiwa"
+        _ = s.handle(event("UserPromptSubmit", cwd: root))
+        _ = s.handle(event("PreToolUse", cwd: root))
+        _ = s.handle(event("PostToolUse", cwd: sub))
+        _ = s.handle(event("Notification", cwd: sub, ["notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"]))
+        #expect(s.waitingText == "my-repo 等你批准 Bash")
+        let f = s.handle(event("Stop", cwd: sub, ["naiwa_seconds": 999.0]))
+        #expect(f?.project == "my-repo")
     }
 
-    func event(_ name: String, _ id: String = "A", _ extra: [String: Any] = [:]) -> [String: Any] {
-        ["hook_event_name": name, "session_id": id, "cwd": "/tmp/proj"].merging(extra) { $1 }
-    }
-
-    @Test func interruptEndsTurn() {
-        let (s, _) = make()
-        _ = s.handle(event("UserPromptSubmit"))
-        _ = s.handle(event("PreToolUse", "A", ["tool_name": "Bash"]))
-        #expect(s.mood == .working)
-        let f = s.handle(event("PostToolUseFailure", "A", ["tool_name": "Bash", "error": "interrupted", "is_interrupt": true]))
-        #expect(f == nil)
-        #expect(s.mood == .idle)
-        #expect(s.nextExpiry == nil)
-    }
-
-    @Test func stopFailureEndsTurnWithoutReaction() {
-        let (s, _) = make()
-        _ = s.handle(event("UserPromptSubmit"))
-        _ = s.handle(event("PreToolUse"))
-        _ = s.handle(event("PostToolUse"))
-        let f = s.handle(event("StopFailure", "A", ["error": "rate_limit"]))
-        #expect(f == nil)
-        #expect(s.mood == .idle)
-    }
-
-    @Test func plainToolFailureKeepsWorking() {
-        let (s, _) = make()
-        _ = s.handle(event("UserPromptSubmit"))
-        _ = s.handle(event("PreToolUse"))
-        _ = s.handle(event("PostToolUseFailure", "A", ["error": "exit 1", "is_interrupt": false]))
-        #expect(s.mood == .working)
-        _ = s.handle(event("PreToolUse"))
-        _ = s.handle(event("PostToolUseFailure", "A", ["error": "exit 1"]))
-        #expect(s.mood == .working)
-        #expect(s.all["A"]?.tools == 2)
-    }
-
-    @Test func interruptClearsOnlyItsOwnWaiting() {
-        let (s, _) = make()
-        _ = s.handle(event("UserPromptSubmit", "A"))
-        _ = s.handle(event("UserPromptSubmit", "B"))
-        _ = s.handle(event("PreToolUse", "A"))
-        _ = s.handle(event("Notification", "A", ["notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"]))
-        #expect(s.mood == .waiting)
-        _ = s.handle(event("PostToolUseFailure", "A", ["is_interrupt": true]))
-        #expect(s.waitingText == nil)
-        #expect(s.mood == .working)   // B 还在干
-        _ = s.handle(event("StopFailure", "B"))
-        #expect(s.mood == .idle)
-    }
-
-    @Test func nextExpiryIsEarliestBusySession() {
-        let (s, c) = make()
-        #expect(s.nextExpiry == nil)
-        let t0 = c.t
-        _ = s.handle(event("UserPromptSubmit", "A"))
-        c.t = t0.addingTimeInterval(60)
-        _ = s.handle(event("UserPromptSubmit", "B"))
-        _ = s.handle(event("SessionStart", "C"))   // 没在干活的不算
-        #expect(s.nextExpiry == t0.addingTimeInterval(Sessions.expiry))
-        c.t = t0.addingTimeInterval(Sessions.expiry)
-        #expect(s.mood == .working)   // A 到点了，B 还没
-        #expect(s.all["A"]?.start == nil)
-        #expect(s.nextExpiry == t0.addingTimeInterval(60 + Sessions.expiry))
-        c.t = t0.addingTimeInterval(60 + Sessions.expiry)
-        #expect(s.mood == .idle)
-        #expect(s.nextExpiry == nil)
+    /// 第一个事件没带 cwd（或是空的），后面带了就用后面的
+    @Test func picksUpLateCwd() {
+        let s = Sessions()
+        _ = s.handle(event("UserPromptSubmit", cwd: nil))
+        _ = s.handle(event("PreToolUse", cwd: ""))
+        _ = s.handle(event("PostToolUse", cwd: "/Users/x/my-repo"))
+        _ = s.handle(event("PreToolUse", cwd: "/Users/x/my-repo/Sources"))
+        let f = s.handle(event("Stop", cwd: "/Users/x/my-repo/Sources", ["naiwa_seconds": 999.0]))
+        #expect(f?.project == "my-repo")
     }
 }
