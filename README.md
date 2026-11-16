@@ -4,7 +4,11 @@
 
 原生 Swift，没有声音，不抢焦点，不花 token。
 
-<p align="center"><img src="docs/demo.webp" width="240" alt="空闲 → 干活 → 等你批准 → 惊鸿一瞥"></p>
+[![奶蛙与 Clawd 的视频预览](docs/assets/promo-preview.webp)](#视频介绍)
+
+## 视频介绍
+
+https://github.com/user-attachments/assets/3b57d454-f4c0-4b1f-8327-81961681a8f9
 
 ## 所有奶蛙
 
@@ -148,6 +152,16 @@ defaults write com.nwverse.naiwa bigSeconds -float 30
 [MIT](LICENSE)
 
 ## 开发
+
+### PR 检查与自动合并
+
+PR 会运行 `macOS checks`：检查脚本语法和素材配置 JSON，编译 Apple 芯片与 Intel 版本，打包通用 App，并验证架构、签名和 `pets` 命令。
+
+维护者给面向 `main` 的非草稿 PR 加上 `automerge` 标签后，会开启自动 squash 合并。必须通过检查、与最新 `main` 同步，并解决所有 review 对话，才会合入；分支落后时先点 **Update branch**，更新后会重新检查。首次贡献者的工作流可能需要维护者先批准运行。
+
+移除 `automerge` 标签、转为草稿或改投其他分支，会取消等待中的自动合并。不加标签的 PR 仍由维护者手动合并。CI 不验证桌面上的播放、锁屏停播和鼠标穿透；相关改动仍须按 `AGENTS.md` 在真机确认，再加标签。
+
+### 本地构建
 
 ```bash
 swift build -c release

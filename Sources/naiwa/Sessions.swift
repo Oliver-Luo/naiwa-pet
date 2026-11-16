@@ -39,8 +39,9 @@ final class Sessions {
     /// 处理一条 hook 事件；一轮结束时返回这一轮的结果。now 给测试用
     func handle(_ e: [String: Any], now: Date = Date()) -> Finished? {
         guard let event = e["hook_event_name"] as? String, let id = e["session_id"] as? String else { return nil }
-        var s = all[id] ?? Session(cwd: e["cwd"] as? String ?? "")
-        if let cwd = e["cwd"] as? String { s.cwd = cwd }
+        var s = all[id] ?? Session(cwd: "")
+        // 事件里的 cwd 是会话当前目录，Claude cd 进子目录就跟着变；项目名只认第一次拿到的
+        if s.cwd.isEmpty, let cwd = e["cwd"] as? String { s.cwd = cwd }
         s.seen = now
         var finished: Finished?
         switch event {
